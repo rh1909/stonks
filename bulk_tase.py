@@ -10,7 +10,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-TASE_URL = "https://market.tase.co.il/he/market_data/securities/data/all"
+LISTINGS = (
+    ("https://market.tase.co.il/he/market_data/securities/data/all", 2, 4, 3),
+    ("https://market.tase.co.il/he/market_data/f-etfs", 1, 2, 6),
+)
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 OUTPUT_FILE = os.path.join(SCRIPT_DIR, "dist", "tase_prices.csv")
 SECURITY_LINK = 'a[href*="/market_data/security/"]'
@@ -27,6 +30,49 @@ def parse_price(value):
         return None
 
 
+def scrape_listing(driver, wait, url, security_column, price_column, type_column, prices):
+    driver.get(url)
+
+    for page_number in range(1, 100):
+        wait.until(lambda browser: len(browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)) > 0)
+        links = driver.find_elements(By.CSS_SELECTOR, SECURITY_LINK)
+        first_href = links[0].get_attribute("href")
+
+        for link in links:
+            row = link.find_element(By.XPATH, "ancestor::tr")
+            cells = row.find_elements(By.CSS_SELECTOR, "td")
+            required_column = max(security_column, price_column, type_column)
+            if len(cells) <= required_column:
+                continue
+
+            security_number = re.sub(r"\D", "", cells[security_column].text)
+            price = parse_price(cells[price_column].text)
+            if not security_number or price is None:
+                continue
+
+            prices[int(security_number)] = (
+                format(price.normalize(), "f"),
+                link.text.strip(),
+                cells[type_column].text.strip(),
+            )
+
+        next_container = driver.find_element(By.CSS_SELECTOR, "li.pagination-next")
+        if next_container.get_attribute("aria-disabled") == "true":
+            return
+
+        next_link = next_container.find_element(By.CSS_SELECTOR, 'a[aria-label="לעמוד הבא"]')
+        driver.execute_script("arguments[0].click();", next_link)
+        wait.until(
+            lambda browser: (
+                browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)
+                and browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)[0].get_attribute("href")
+                != first_href
+            )
+        )
+
+    raise RuntimeError(f"TASE pagination did not finish for {url}")
+
+
 def export_all_tase_prices():
     options = Options()
     options.add_argument("--headless=new")
@@ -39,45 +85,8 @@ def export_all_tase_prices():
     prices = {}
 
     try:
-        driver.get(TASE_URL)
-
-        for page_number in range(1, 100):
-            wait.until(lambda browser: len(browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)) > 0)
-            links = driver.find_elements(By.CSS_SELECTOR, SECURITY_LINK)
-            first_href = links[0].get_attribute("href")
-
-            for link in links:
-                row = link.find_element(By.XPATH, "ancestor::tr")
-                cells = row.find_elements(By.CSS_SELECTOR, "td")
-                if len(cells) < 5:
-                    continue
-
-                security_number = re.sub(r"\D", "", cells[2].text)
-                price = parse_price(cells[4].text)
-                if not security_number or price is None:
-                    continue
-
-                prices[int(security_number)] = (
-                    format(price.normalize(), "f"),
-                    link.text.strip(),
-                    cells[3].text.strip(),
-                )
-
-            next_container = driver.find_element(By.CSS_SELECTOR, "li.pagination-next")
-            if next_container.get_attribute("aria-disabled") == "true":
-                break
-
-            next_link = next_container.find_element(By.CSS_SELECTOR, 'a[aria-label="לעמוד הבא"]')
-            driver.execute_script("arguments[0].click();", next_link)
-            wait.until(
-                lambda browser: (
-                    browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)
-                    and browser.find_elements(By.CSS_SELECTOR, SECURITY_LINK)[0].get_attribute("href")
-                    != first_href
-                )
-            )
-        else:
-            raise RuntimeError("TASE pagination did not finish")
+        for listing in LISTINGS:
+            scrape_listing(driver, wait, *listing, prices)
     finally:
         driver.quit()
 
